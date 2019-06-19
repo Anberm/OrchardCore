@@ -46,9 +46,9 @@ namespace OrchardCore.Workflows.Expressions
             var templateContext = await CreateTemplateContextAsync(workflowContext);
             var expressionContext = new WorkflowExecutionExpressionContext(templateContext, workflowContext);
 
-            await _workflowContextHandlers.InvokeAsync(async x => await x.EvaluatingExpressionAsync(expressionContext), _logger);
+            await _workflowContextHandlers.InvokeAsync(x => x.EvaluatingExpressionAsync(expressionContext), _logger);
 
-            var result = await _liquidTemplateManager.RenderAsync(expression.Expression, templateContext);
+            var result = await _liquidTemplateManager.RenderAsync(expression.Expression, System.Text.Encodings.Web.JavaScriptEncoder.Default, templateContext);
             return string.IsNullOrWhiteSpace(result) ? default(T) : (T)Convert.ChangeType(result, typeof(T));
         }
 
@@ -63,8 +63,8 @@ namespace OrchardCore.Workflows.Expressions
             context.MemberAccessStrategy.Register<WorkflowExecutionContext, LiquidPropertyAccessor>("Input", obj => new LiquidPropertyAccessor(name => ToFluidValue(obj.Input, name)));
             context.MemberAccessStrategy.Register<WorkflowExecutionContext, LiquidPropertyAccessor>("Output", obj => new LiquidPropertyAccessor(name => ToFluidValue(obj.Output, name)));
             context.MemberAccessStrategy.Register<WorkflowExecutionContext, LiquidPropertyAccessor>("Properties", obj => new LiquidPropertyAccessor(name => ToFluidValue(obj.Properties, name)));
-            context.SetValue("Workflow", workflowContext);
 
+            context.SetValue("Workflow", workflowContext);
             // Add services.
             context.AmbientValues.Add("Services", services);
 

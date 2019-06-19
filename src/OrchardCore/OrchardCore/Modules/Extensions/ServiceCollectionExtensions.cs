@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -7,15 +6,19 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Microsoft.Net.Http.Headers;
 using OrchardCore;
 using OrchardCore.Environment.Extensions;
 using OrchardCore.Environment.Shell;
+using OrchardCore.Environment.Shell.Builders;
+using OrchardCore.Environment.Shell.Configuration;
 using OrchardCore.Environment.Shell.Descriptor.Models;
+using OrchardCore.Localization;
 using OrchardCore.Modules;
 
 namespace Microsoft.Extensions.DependencyInjection
@@ -61,15 +64,23 @@ namespace Microsoft.Extensions.DependencyInjection
 
             // These services might be moved at a higher level if no components from OrchardCore needs them.
             services.AddLocalization();
+
+            // For performance, prevents the 'ResourceManagerStringLocalizer' from being used.
+            services.AddSingleton<IStringLocalizerFactory, NullStringLocalizerFactory>();
+
             services.AddWebEncoders();
 
             // ModularTenantRouterMiddleware which is configured with UseOrchardCore() calls UseRouter() which requires the routing services to be
             // registered. This is also called by AddMvcCore() but some applications that do not enlist into MVC will need it too.
             services.AddRouting();
 
-            services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
+            services.AddHttpContextAccessor();
             services.AddSingleton<IClock, Clock>();
             services.AddScoped<ILocalClock, LocalClock>();
+
+            services.AddScoped<ILocalizationService, DefaultLocalizationService>();
+            services.AddScoped<ICalendarManager, DefaultCalendarManager>();
+            services.AddScoped<ICalendarSelector, DefaultCalendarSelector>();
 
             services.AddSingleton<IPoweredByMiddlewareOptions, PoweredByMiddlewareOptions>();
             services.AddTransient<IModularTenantRouteBuilder, ModularTenantRouteBuilder>();
@@ -94,7 +105,7 @@ namespace Microsoft.Extensions.DependencyInjection
         {
             builder.ApplicationServices.AddSingleton<IModuleNamesProvider, AssemblyAttributeModuleNamesProvider>();
             builder.ApplicationServices.AddSingleton<IApplicationContext, ModularApplicationContext>();
-            
+
             builder.ApplicationServices.AddExtensionManagerHost();
 
             builder.ConfigureServices(services =>
@@ -131,10 +142,14 @@ namespace Microsoft.Extensions.DependencyInjection
                 options.RequestPath = "";
                 options.FileProvider = fileProvider;
 
+                var shellConfiguration = serviceProvider.GetRequiredService<IShellConfiguration>();
+
+                var cacheControl = shellConfiguration.GetValue("StaticFileOptions:CacheControl", "public, max-age=2592000, s-max-age=31557600");
+
                 // Cache static files for a year as they are coming from embedded resources and should not vary
                 options.OnPrepareResponse = ctx =>
                 {
-                    ctx.Context.Response.Headers[HeaderNames.CacheControl] = "max-age=" + (int)TimeSpan.FromDays(365).TotalSeconds;
+                    ctx.Context.Response.Headers[HeaderNames.CacheControl] = cacheControl;
                 };
 
                 app.UseStaticFiles(options);
@@ -153,13 +168,19 @@ namespace Microsoft.Extensions.DependencyInjection
                 var settings = serviceProvider.GetRequiredService<ShellSettings>();
 
                 var tenantName = settings.Name;
-                var tenantPrefix = "/" + settings.RequestUrlPrefix;
 
-                services.AddAntiforgery(options =>
-                {
-                    options.Cookie.Name = "orchantiforgery_" + tenantName;
-                    options.Cookie.Path = tenantPrefix;
-                });
+                // Re-register the antiforgery  services to be tenant-aware.
+                var collection = new ServiceCollection()
+                    .AddAntiforgery(options =>
+                    {
+                        options.Cookie.Name = "orchantiforgery_" + tenantName;
+
+                        // Don't set the cookie builder 'Path' so that it uses the 'IAuthenticationFeature' value
+                        // set by the pipeline and comming from the request 'PathBase' which already ends with the
+                        // tenant prefix but may also start by a path related e.g to a virtual folder.
+                    });
+
+                services.Add(collection);
             });
         }
 
@@ -198,9 +219,9 @@ namespace Microsoft.Extensions.DependencyInjection
                 var options = serviceProvider.GetRequiredService<IOptions<ShellOptions>>();
 
                 var directory = Directory.CreateDirectory(Path.Combine(
-                options.Value.ShellsApplicationDataPath,
-                options.Value.ShellsContainerName,
-                settings.Name, "DataProtection-Keys"));
+                    options.Value.ShellsApplicationDataPath,
+                    options.Value.ShellsContainerName,
+                    settings.Name, "DataProtection-Keys"));
 
                 // Re-register the data protection services to be tenant-aware so that modules that internally
                 // rely on IDataProtector/IDataProtectionProvider automatically get an isolated instance that
@@ -213,14 +234,13 @@ namespace Microsoft.Extensions.DependencyInjection
                     .Services;
 
                 // Retrieve the implementation type of the newly startup filter registered as a singleton
-                var startupFilterType = collection.FirstOrDefault(s => s.ServiceType == typeof(IStartupFilter))?.ImplementationType;
+                var startupFilterType = collection.FirstOrDefault(s => s.ServiceType == typeof(IStartupFilter))?.GetImplementationType();
 
                 if (startupFilterType != null)
                 {
                     // Remove any previously registered data protection startup filters.
                     var descriptors = services.Where(s => s.ServiceType == typeof(IStartupFilter) &&
-                        (s.ImplementationInstance?.GetType() == startupFilterType ||
-                        s.ImplementationType == startupFilterType)).ToArray();
+                        (s.GetImplementationType() == startupFilterType)).ToArray();
 
                     foreach (var descriptor in descriptors)
                     {
